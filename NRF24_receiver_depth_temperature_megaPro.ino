@@ -14,111 +14,98 @@
 #include "printf.h"
 #include <Wire.h> 
 
-// Hardware configuration: Set up nRF24L01 radio on SPI bus plus pins 7 & 8 
-RF24 radio(46,47);
-// Topology
-const uint64_t pipes = 0xABCDABCD71LL;              // Radio pipe addresses for the 2 nodes to communicate.
+//DS18B20
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#define ONE_WIRE_BUS 6
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+#define NUM_SENSORS 6
+#define TEMPERATURE_PRECISION 9
+int temperature[NUM_SENSORS];
+DeviceAddress sensor_address[NUM_SENSORS] =
+{
+    { 0x28, 0x95, 0xF3, 0x44, 0x06, 0x00, 0x00, 0x93 },       // Lauko
+    { 0x28, 0xFF, 0x32, 0x34, 0x63, 0x16, 0x04, 0x6F },       // svetine
+    { 0x28, 0xFF, 0xFD, 0x73, 0x63, 0x16, 0x03, 0xC7 },       // zidinys
+    { 0x28, 0xFF, 0xB5, 0x36, 0x63, 0x16, 0x04, 0xF2 },       // garazas
+    { 0x28, 0xFF, 0x65, 0x0F, 0x62, 0x16, 0x04, 0xDC },       // hidroforas
+    {0x28, 0xEB, 0x92, 0x44, 0x06, 0x00, 0x00, 0xC4}  //palepe
+};
 
-// A single byte to keep track of the data being sent back and forth
+//nRF24L01
+RF24 radio(7,8);
+const uint64_t pipes = 0xB3B4B5B6F1LL; // Needs to be the same for communicating between 2 NRF24L01 
+const long RFUpdatePeriod =  60000L;  //60000=1min
+long RFLastUpdate = 0;
+
 typedef struct {
-  int dist; //distante
-  int perc; //percentage
-  int volt; //battery reading
-} RxMsg;
+  int lauko; 
+  int svetai; 
+  int zidinys; 
+  int garazas;
+  int hidroforas;
+  int palepe;
+} dataPacket;
 
-RxMsg packet;
-char OledTxt[15];
-unsigned int fVolt = 0;
-unsigned int heaVolt = 0;
-unsigned int decVolt = 0;
-
-//LCD
-#include <LiquidCrystal_I2C.h>
-LiquidCrystal_I2C lcd(0x27,20,4);  // set the LCD address to 0x27 for a 16 chars and 2 line display
-
-//RTC
-#include "RTClib.h"
-#include <Wire.h>
-RTC_DS1307 RTC;
-DateTime dt_now;
-
-
+dataPacket packet;
 
 void setup() {
   Serial.begin(115200);
-  debugln(F("Starting init"));
-  //RTC INIT
-  Wire.begin();
-  RTC.begin();
-  if (! RTC.begin()) {
-    debugln(F("Couldn't find RTC"));
-    while (1);
-  }
-  if (RTC.isrunning()) {
-    debugln(F("Nustatom RTC laika!!!"));
-    //RTC.adjust(DateTime(__DATE__, __TIME__));
-  }
-  lcd.begin();
-  lcd.backlight();
-  lcd.home (); 
-  lcd.setCursor(0,0);
-  lcd.print(F("Temperaturos/backos"));  
-  lcd.setCursor(0,1);
-  lcd.print(F("sistema v.1"));  
-  Wire.begin();
-  //NRF24 init
-   printf_begin();
+  printf_begin();
   // Setup and configure rf radio
   radio.begin();
   radio.setAutoAck(1);                    // Ensure autoACK is enabled
   radio.enableAckPayload();               // Allow optional ack payloads
   radio.setRetries(0,15);                 // Smallest time between retries, max no. of retries
-  //radio.setPayloadSize(2);                // Here we are sending 1-byte payloads to test the call-response speed
-  radio.enableDynamicPayloads();
+  //radio.setPayloadSize(2); // setting the payload size to the needed value
+  radio.setPayloadSize(sizeof(dataPacket));
   radio.setDataRate(RF24_250KBPS); // reducing bandwidth
-  radio.openReadingPipe(1,pipes);
-  radio.startListening();                 // Start listening
+  radio.openWritingPipe(pipes);
   radio.printDetails();  
-  delay(1000);
-  lcd.clear();
-  debugln(F("Init complete"));
+  //DS18B20 INIT
+  Wire.begin();
+  sensors.begin();
+  for( int i=0; i<NUM_SENSORS; i++){
+    sensors.setResolution( sensor_address[i], TEMPERATURE_PRECISION);
+  }
+  debugln("Setup done!!!");
 }
+
 
 void loop() {
-  dt_now = RTC.now();
-  prtTime();
-  while(radio.available() ){
-    unsigned long tim = micros();
-    radio.read( &packet, sizeof(RxMsg));
-    //printf("Got response %d, round-trip delay: %lu microseconds\n\r",RX_msg,tim-time);
-    debugln(packet.dist);
-    debugln(packet.perc);
-    debugln(packet.volt);
-    debugln("-------");
-    int tempVolt = packet.volt;
-    //debug("tempVolt:");
-    //debugln(tempVolt);
-    fVolt = map(tempVolt, 0, 1023, 0, 853);
-    heaVolt = (fVolt/100);
-    decVolt = ((fVolt-heaVolt) % 100);
-    //debug("decVolt:");
-    //debugln(decVolt);
-    lcd.setCursor(0,1);
-    sprintf(OledTxt,"%d%%",packet.perc); 
-    lcd.print(OledTxt);
-    lcd.setCursor(0,2);
-    sprintf(OledTxt,"Gylis:%d cm",packet.dist); 
-    lcd.print(OledTxt);
-    lcd.setCursor(0,3);
-    sprintf(OledTxt,"Batt:%d.%02d V", heaVolt, decVolt); 
-    lcd.print(OledTxt);
+  unsigned long currentMillis = millis();
+  readTemp();
+  if(currentMillis - RFLastUpdate > RFUpdatePeriod) {
+    RFLastUpdate = currentMillis;
+    packet.lauko = temperature[0];
+    packet.svetai = temperature[1];
+    packet.zidinys = temperature[2];
+    packet.garazas = temperature[3];
+    packet.hidroforas = temperature[4];
+    packet.palepe = temperature[5];
+    
+    radio.stopListening();                                  // First, stop listening so we can talk.
+    if (radio.write(&packet, sizeof(dataPacket) )){
+      debugln(F("failed.")); 
+    }else{
+      debugln(F("Packed send!!."));
+    }
   }
-  delay(300);
+  delay(1000);
 }
 
-void prtTime(){
-  char curr_TimeBuffer[4];
-  sprintf(curr_TimeBuffer,"%02u:%02u",dt_now.hour(),dt_now.minute());  
-  lcd.setCursor(0,0);
-  lcd.print(curr_TimeBuffer);
+void readTemp(){
+  sensors.requestTemperatures();
+  for(int i=0; i<NUM_SENSORS; i++){
+    if((int) sensors.getTempC(sensor_address[i]) == -127){
+      temperature[i] = 0;
+    }else{
+      temperature[i] = (int) sensors.getTempC(sensor_address[i]);
+      debugln(temperature[i]);
+    }
+    char TempBuffer[5];
+    //sprintf(TempBuffer,"Temp_%d:%02d", i, temperature[i]);
+    //debugln(TempBuffer);
+  }
 }
