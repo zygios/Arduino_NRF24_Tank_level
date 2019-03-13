@@ -55,6 +55,13 @@ void setup() {
   delay(300);
 }
 
+void burn8Readings(int pin)
+{
+  for (int i = 0; i < 8; i++)
+  {
+    analogRead(pin);
+  }
+}
 
 void loop() {
   digitalWrite(DistVcc, HIGH);
@@ -75,17 +82,36 @@ void loop() {
  
   printf("Distance: %d cm.\n\r",distance);
   printf("Uzpildyta: %d .\n\r",packet.perc);
+  uint16_t nResult1, nResult2;
+
+  analogReference(INTERNAL);    // set the ADC reference to 1.1V
+  burn8Readings(A0);            // make 8 readings but don't use them to ensure good reading after ADC reference change
+  delay(10);                    // idle some time
+  nResult1 = analogRead(A0);    // read actual value
+
+  analogReference(DEFAULT);     // set the ADC reference back to internal for other measurements
+  burn8Readings(A0);            // make 8 readings but don't use them to ensure good reading after ADC reference change
+  delay(10);                    // idle again
+  nResult2 = analogRead(A0);    // do other measurements
+
+// print result to serial interface..
+  Serial.print("1: ");  
+  Serial.print(nResult1);
+  Serial.print(" - 2: ");
+  Serial.println(nResult2);
+
   int anlVolt = analogRead(A0);
   debug("Battery:");
   debugln(anlVolt);
   packet.dist = distance;
   packet.perc = ((TankDepth-distance)*100)/TankDepth;
-  packet.volt = anlVolt;
+  packet.volt = nResult2;
   
   radio.stopListening();                                  // First, stop listening so we can talk.
   if (radio.write(&packet, sizeof(dataPacket) )){
     Serial.println(F("failed.")); 
   }
+  delay(200);
   unsigned int sleepCounter;
   //37 = 5 min sleep
   for (sleepCounter =7; sleepCounter > 0; sleepCounter--){
